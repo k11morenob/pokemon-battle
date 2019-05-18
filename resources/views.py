@@ -10,8 +10,8 @@ from flask import jsonify
 from bson.objectid import ObjectId
 from bson.errors import InvalidId
 import random
-from .utils import get_pokemon
 from .tasks import *
+
 
 ns = api.namespace('league', description='Endpoint for leagues')
 
@@ -36,11 +36,11 @@ class leagues(Resource):
 	@api.expect(league_parser)
 	def post(self):
 		args = league_parser.parse_args()
-		create_league(args)
+		create_league.delay(args)
 		return {'message': 'request success'}
 
 @ns.route('/<string:lid>')
-
+@ns.doc(params={'lid': 'Id of the league'})
 class league(Resource):
 	
 	def get(self, lid):
@@ -61,9 +61,97 @@ class league(Resource):
 		league = db.leagues.find_one({'_id': ObjectId(lid) })
 		return jsonify({'id': str(league.get('_id')), 'name': league['name']})
 
+battle_parser = api.parser()
+battle_parser.add_argument('master_1', type=str, help="master 1 id", location='form', required=True)
+battle_parser.add_argument('master_2', type=str, help="master 2 id", location='form', required=True)
+
+@ns.route('/battle')
+
+class league_battle(Resource):
+
+	@api.doc(parser=battle_parser)
+	@api.expect(battle_parser)
+	def post(self):
+		args = battle_parser.parse_args()
+		self.validate(args)
+		data = {'master_1': args['master_1'], 'master_2': args['master_2']}
+		lg_battle.delay(data)
+		return {'message': 'league battle is in process'}
+
+	def validate(self, data):
+		if data['master_1'] == data['master_2']:
+			api.abort(400, "you can't battle against yourself")
+		try:
+			masters = db.masters.find({ '_id': { '$in': [ ObjectId(data['master_1']), ObjectId(data['master_2']) ] } })
+			if masters[0]['league'] != masters[1]['league']:
+				api.abort(400, "the masters don't belong to the same league")
+		except InvalidId as e:
+			api.abort(400, e)
 
 
-ns = api.namespace('masters', description='Endpoint for leagues')
+@ns.route('/rank/<string:lid>')
+@ns.doc(params={'lid': 'Id of the league'})
+class rank(Resource):
+
+	def get(self, lid):
+		rank = {}
+		position = 1
+		league_masters = db.masters.find({'league': lid}).sort('battles_won', -1)
+		for master in league_masters:
+			rank[position] = {'id': str(master['_id']),'name': master['name'], 'victories': master.get('battles_won') or 0, 'defeats': master.get('battles_lost') or 0}
+			position = position + 1
+		return rank
+
+@ns.route('/results/<string:lid>')
+@ns.doc(params={'lid': 'Id of the league'})
+class league_results(Resource):
+
+	def get(self, lid):
+		result = {}
+		league = db.leagues.find_one({ '_id': ObjectId(lid)})
+		result['league'] = {'id':lid, 'name': league['name']}
+		result['results'] = []
+		battles = db.league_battles.find({'league': lid})
+		for battle in battles:
+			winner = db.masters.find_one({'_id': ObjectId(battle['winner'])})
+			loser = db.masters.find_one({'_id': ObjectId(battle['loser'])})
+			result['results'].append(
+					{
+					'winner': 
+						{
+							'id': str(winner['_id']),
+							'name': winner['name']
+						}
+					,
+					'loser': 
+						{
+							'id': str(loser['_id']),
+							'name': loser['name']
+						}
+					})
+		return result
+
+@ns.route('/winners')
+
+class winners(Resource):
+
+	def get(self):
+		response = []
+		leagues = db.leagues.find()
+		for league in leagues:
+			try:
+				winner = db.masters.find({'league': str(league['_id'])}).sort('battles_won', -1).limit(1)[0]
+				if winner.get('battles_won') != None and winner.get('battles_won') > 0:
+					response.append({'league':{'id': str(league['_id']), 'name':league['name']},'winner': {'id': str(winner['_id']),'name': winner['name'], 'victories': winner.get('battles_won') or 0, 'defeats': winner.get('battles_lost') or 0}})
+				else:
+					response.append({'league': {'id': str(league['_id']), 'name':league['name']} ,'winner': {}})
+			except IndexError:
+				response.append({'league':{'id': str(league['_id']), 'name':league['name']},'winner': {}})
+
+		return response
+
+
+ns = api.namespace('masters', description='Endpoint for masters')
 
 master_parser = api.parser()
 master_parser.add_argument('league', type=str, help="league's id", location='form', required=True)
@@ -79,7 +167,7 @@ class masters(Resource):
 		try:
 			masters = db.masters.find()
 			for master in masters:
-				response.append({'id': str(master.get('_id')), 'name': master['name'], 'pokemons': master['pokemons'], 'league': master['league']})
+				response.append({'id': str(master.get('_id')), 'name': master['name'], 'pokemons': master['pokemons'], 'league': master['league'], 'battles_won': master.get('battles_won'), 'battles_lost': master.get('battles_lost')})
 			return jsonify(response)
 		except Exception as e:
 			return jsonify({'error' : str(e)})
@@ -89,10 +177,7 @@ class masters(Resource):
 	def post(self):
 		args = master_parser.parse_args()
 		self.validate(args)
-		pokemons = self.get_pokemons(args['n_pokemons'])
-		master = db.masters.insert({'name': args['name'], 'pokemons': pokemons, 'league':args['league']})
-		new_master = db.masters.find_one({'_id': master })
-		response = {'id': str(new_master.get('_id')), 'name': new_master['name'], 'pokemons': new_master['pokemons'], 'league': new_master['league']}
+		create_master.delay(args)
 		return response
 
 	def validate_league(self, lid):
@@ -106,32 +191,13 @@ class masters(Resource):
 
 	def validate(self, data):
 
+		if data['n_pokemons'] < 1 or data['n_pokemons'] > 6:
+			api.abort(400, 'Number of pokemons has to be between 1 and 6')			
 		self.validate_league(data['league'])
 
-		return 
+		return
 
-	def get_pokemons(self, n_pokemons):
-
-		pokemons_ids = []
-		pokemons = []
-		while True:
-			new_pokemon = random.randint(1,101)
-			
-			if len(pokemons_ids) >= n_pokemons:
-				break
-			
-			try:
-				pokemons_ids.index(new_pokemon)
-			except ValueError:
-				pokemons_ids.append(new_pokemon)
-
-		for pkid in pokemons_ids:
-			pokemon = get_pokemon(pkid)
-			pokemons.append(json.loads(pokemon)['name'])
-
-		return pokemons
-
-ns = api.namespace('league', description='Endpoint for battles')
+ns = api.namespace('training', description='Endpoint for training battles')
 
 battle_parser = api.parser()
 battle_parser.add_argument('master_1', type=str, help="master 1 id", location='form', required=True)
@@ -139,9 +205,44 @@ battle_parser.add_argument('master_2', type=str, help="master 2 id", location='f
 
 @ns.route('/battle')
 
-class league_battle(Resource):
+class trainning_battle(Resource):
 
 	@api.doc(parser=battle_parser)
 	@api.expect(battle_parser)
 	def post(self):
-		pass
+		args = battle_parser.parse_args()
+		self.validate(args)
+		data = {'master_1': args['master_1'], 'master_2': args['master_2']}
+		training_battle.delay(data)
+		return {'message': 'league battle is in process'}
+
+	def validate(self, data):
+		if data['master_1'] == data['master_2']:
+			api.abort(400, "you can't battle against yourself")	
+
+
+@ns.route('/results')
+
+class training_results(Resource):
+
+	def get(self):
+		result = []
+		battles = db.training_battles.find()
+		for battle in battles:
+			winner = db.masters.find_one({'_id': ObjectId(battle['winner'])})
+			loser = db.masters.find_one({'_id': ObjectId(battle['loser'])})
+			result.append(
+					{
+					'winner': 
+						{
+							'id': str(winner['_id']),
+							'name': winner['name']
+						},
+					'loser': 
+						{
+							'id': str(loser['_id']),
+							'name': loser['name']
+						}
+					}
+					)
+		return result

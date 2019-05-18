@@ -4,9 +4,10 @@ from flask import Flask
 def make_celery(app):
 
 	celery = Celery(
-		app.import_name,
+		'pokemonBV',
 		enable_utc=False,
-		timezone='America/Caracas'
+		timezone='America/Caracas',
+		broker='pyamqp://guest@localhost//'
 		)
 	celery.conf.update(app.config)
 
