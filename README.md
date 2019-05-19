@@ -7,7 +7,7 @@
 
 ------------------------------------------------------------------------------------------
 
-## Install and run
+## Install and run:
 
 * For run, download or clone the code and go into the folder
 * Create a virtual env with Python 3.x and run it
